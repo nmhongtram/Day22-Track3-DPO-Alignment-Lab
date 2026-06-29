@@ -69,8 +69,13 @@ from peft import PeftModel
 import gc
 
 
-def generate_with_adapter(adapter_path: Path, prompts: list[dict], max_new_tokens: int = 256):
-    """Load base + adapter, generate for all prompts, free memory, return outputs."""
+def generate_with_adapter(
+    adapter_path: Path,
+    prompts: list[dict],
+    max_new_tokens: int = 256,
+    stack_sft: bool = False,
+):
+    """Load base + adapter(s), generate for all prompts, free memory, return outputs."""
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=BASE_MODEL,
         max_seq_length=MAX_LEN,
@@ -80,6 +85,8 @@ def generate_with_adapter(adapter_path: Path, prompts: list[dict], max_new_token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    if stack_sft:
+        model = PeftModel.from_pretrained(model, str(SFT_PATH))
     model = PeftModel.from_pretrained(model, str(adapter_path))
     FastLanguageModel.for_inference(model)
 
@@ -120,7 +127,7 @@ print(f"Done — {len(sft_outputs)} responses")
 
 # %%
 print("Generating with SFT+DPO adapter...")
-dpo_outputs = generate_with_adapter(DPO_PATH, EVAL_PROMPTS)
+dpo_outputs = generate_with_adapter(DPO_PATH, EVAL_PROMPTS, stack_sft=True)
 print(f"Done — {len(dpo_outputs)} responses")
 
 # %% [markdown]

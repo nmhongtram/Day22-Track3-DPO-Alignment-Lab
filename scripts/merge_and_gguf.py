@@ -57,6 +57,9 @@ def main():
     model = PeftModel.from_pretrained(model, args.sft_path)
     print("Loaded SFT-mini adapter")
 
+    model = PeftModel.from_pretrained(model, args.dpo_path)
+    print("Loaded DPO adapter")
+
     # Step 2: save merged FP16
     model.save_pretrained_merged(
         args.merged_output, tokenizer, save_method="merged_16bit",

@@ -29,11 +29,11 @@ from pathlib import Path
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 
 if COMPUTE_TIER == "T4":
-    PREF_SLICE = 1000
+    PREF_SLICE = int(os.environ.get("PREF_SLICE", "2000"))  # README T4 tier; set 1000 if OOM
     MAX_LEN = 512
     MAX_PROMPT_LEN = 256
 else:
-    PREF_SLICE = 5000
+    PREF_SLICE = int(os.environ.get("PREF_SLICE", "5000"))
     MAX_LEN = 1024
     MAX_PROMPT_LEN = 512
 

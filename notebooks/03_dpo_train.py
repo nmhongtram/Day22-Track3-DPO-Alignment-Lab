@@ -31,6 +31,7 @@ if COMPUTE_TIER == "T4":
     MAX_PROMPT_LEN = 256
     PER_DEVICE_BATCH = 1
     GRAD_ACCUM = 8
+    # OOM fallback: MAX_LEN=384, GRAD_ACCUM=16, and os.environ['PREF_SLICE']='1000' before NB2
 else:
     BASE_MODEL = "unsloth/Qwen2.5-7B-bnb-4bit"
     MAX_LEN = 1024
@@ -275,6 +276,10 @@ print(f"Saved DPO adapter to {DPO_OUT}")
 # Save the headline metrics for verify.py + REFLECTION
 import json
 
+end_chosen = float(logs[chosen_col].iloc[-5:].mean()) if chosen_col and len(logs) >= 5 else None
+end_rejected = float(logs[rejected_col].iloc[-5:].mean()) if rejected_col and len(logs) >= 5 else None
+end_gap = (end_chosen - end_rejected) if end_chosen is not None and end_rejected is not None else None
+
 metrics = {
     "compute_tier": COMPUTE_TIER,
     "base_model": BASE_MODEL,
@@ -282,9 +287,9 @@ metrics = {
     "lr": LR,
     "epochs": EPOCHS,
     "final_train_loss": float(train_result.training_loss),
-    "end_chosen_reward": float(last_chosen) if chosen_col else None,
-    "end_rejected_reward": float(last_rejected) if rejected_col else None,
-    "end_reward_gap": float(last_gap) if chosen_col and rejected_col else None,
+    "end_chosen_reward": end_chosen,
+    "end_rejected_reward": end_rejected,
+    "end_reward_gap": end_gap,
 }
 (DPO_OUT / "dpo_metrics.json").write_text(json.dumps(metrics, indent=2))
 print(f"Wrote metrics to {DPO_OUT / 'dpo_metrics.json'}")

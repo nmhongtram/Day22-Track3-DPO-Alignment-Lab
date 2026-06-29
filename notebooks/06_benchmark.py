@@ -74,14 +74,48 @@ assert torch.cuda.is_available(), "Need GPU. See HARDWARE-GUIDE.md."
 import subprocess
 
 
-def run_lm_eval(adapter_path, tasks, limit, num_fewshot, label):
-    """Run lm-eval-harness with PEFT adapter on top of base, return parsed metrics."""
+def ensure_stacked_model():
+    """Export SFT+DPO merged weights for lm-eval (single peft= path is insufficient)."""
+    stacked_dir = REPO_ROOT / "adapters" / "sft-dpo-stacked"
+    if (stacked_dir / "config.json").exists():
+        return stacked_dir
+
+    from peft import PeftModel
+    from unsloth import FastLanguageModel
+
+    base = "unsloth/Qwen2.5-3B-bnb-4bit" if COMPUTE_TIER == "T4" else "unsloth/Qwen2.5-7B-bnb-4bit"
+    max_len = 512 if COMPUTE_TIER == "T4" else 1024
+
+    print(f"Building stacked SFT+DPO export at {stacked_dir} (one-time, ~2 min)...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=base, max_seq_length=max_len, dtype=None, load_in_4bit=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = PeftModel.from_pretrained(model, str(SFT_PATH))
+    model = PeftModel.from_pretrained(model, str(DPO_PATH))
+    model = model.merge_and_unload()
+    stacked_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(stacked_dir))
+    tokenizer.save_pretrained(str(stacked_dir))
+    del model, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    return stacked_dir
+
+
+def run_lm_eval(model_path, tasks, limit, num_fewshot, label, use_peft=True):
+    """Run lm-eval-harness; use use_peft=False for merged stacked model dir."""
     base = "unsloth/Qwen2.5-3B-bnb-4bit" if COMPUTE_TIER == "T4" else "unsloth/Qwen2.5-7B-bnb-4bit"
     out_dir = EVAL_OUT / f"lm-{label}-{tasks}"
+    if use_peft:
+        model_args = f"pretrained={base},peft={model_path},load_in_4bit=True"
+    else:
+        model_args = f"pretrained={model_path},load_in_4bit=True"
     cmd = [
         "lm_eval",
         "--model", "hf",
-        "--model_args", f"pretrained={base},peft={adapter_path},load_in_4bit=True",
+        "--model_args", model_args,
         "--tasks", tasks,
         "--num_fewshot", str(num_fewshot),
         "--limit", str(limit),
@@ -95,10 +129,20 @@ def run_lm_eval(adapter_path, tasks, limit, num_fewshot, label):
     out_files = sorted(out_dir.glob("**/results*.json"))
     if not out_files:
         print("WARN: lm-eval didn't write results JSON. STDOUT tail:")
-        print(proc.stdout[-1000:])
+        print(proc.stdout[-1000:] if proc.stdout else "(empty stdout)")
+        if proc.stderr:
+            print("STDERR tail:")
+            print(proc.stderr[-1000:])
         return {"error": "no_results"}
     return json.loads(out_files[-1].read_text())["results"]
 
+
+# %% [markdown]
+# ## 1b. Prep stacked SFT+DPO export for lm-eval
+
+# %%
+STACKED_PATH = ensure_stacked_model()
+print(f"Stacked model ready: {STACKED_PATH}")
 
 # %% [markdown]
 # ## 2. IFEval — Instruction-Following (programmatic)
@@ -114,7 +158,7 @@ gc.collect()
 torch.cuda.empty_cache()
 
 print(">>> SFT+DPO on IFEval")
-dpo_ifeval = run_lm_eval(DPO_PATH, "ifeval", LIMIT_IFEVAL, num_fewshot=0, label="dpo")
+dpo_ifeval = run_lm_eval(STACKED_PATH, "ifeval", LIMIT_IFEVAL, num_fewshot=0, label="dpo", use_peft=False)
 gc.collect()
 torch.cuda.empty_cache()
 
@@ -131,7 +175,7 @@ gc.collect()
 torch.cuda.empty_cache()
 
 print(">>> SFT+DPO on GSM8K")
-dpo_gsm8k = run_lm_eval(DPO_PATH, "gsm8k", LIMIT_GSM8K, num_fewshot=8, label="dpo")
+dpo_gsm8k = run_lm_eval(STACKED_PATH, "gsm8k", LIMIT_GSM8K, num_fewshot=8, label="dpo", use_peft=False)
 gc.collect()
 torch.cuda.empty_cache()
 
@@ -148,7 +192,7 @@ gc.collect()
 torch.cuda.empty_cache()
 
 print(">>> SFT+DPO on MMLU (sampled)")
-dpo_mmlu = run_lm_eval(DPO_PATH, "mmlu", LIMIT_MMLU, num_fewshot=5, label="dpo")
+dpo_mmlu = run_lm_eval(STACKED_PATH, "mmlu", LIMIT_MMLU, num_fewshot=5, label="dpo", use_peft=False)
 gc.collect()
 torch.cuda.empty_cache()
 
@@ -183,8 +227,8 @@ alpaca_prompts = load_alpaca_lite_prompts(LIMIT_ALPACA)
 print(f"Loaded {len(alpaca_prompts)} AlpacaEval-lite prompts")
 
 # %%
-def generate_with_adapter(adapter_path, prompts, max_new_tokens=256):
-    """NB4 pattern: load base + adapter, generate, free memory."""
+def generate_with_adapter(adapter_path, prompts, max_new_tokens=256, stack_sft=False):
+    """NB4 pattern: load base + adapter(s), generate, free memory."""
     from unsloth import FastLanguageModel
     from peft import PeftModel
 
@@ -196,6 +240,8 @@ def generate_with_adapter(adapter_path, prompts, max_new_tokens=256):
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if stack_sft:
+        model = PeftModel.from_pretrained(model, str(SFT_PATH))
     model = PeftModel.from_pretrained(model, str(adapter_path))
     FastLanguageModel.for_inference(model)
 
@@ -266,7 +312,7 @@ if alpaca_prompts and (os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHR
     print(f">>> Generating SFT-only on {len(alpaca_prompts)} AlpacaEval-lite prompts")
     sft_outputs = generate_with_adapter(SFT_PATH, alpaca_prompts)
     print(f">>> Generating SFT+DPO")
-    dpo_outputs = generate_with_adapter(DPO_PATH, alpaca_prompts)
+    dpo_outputs = generate_with_adapter(DPO_PATH, alpaca_prompts, stack_sft=True)
 
     print(f">>> Judging {len(alpaca_prompts)} pairs (random A/B order)")
     judgments = []
@@ -439,4 +485,4 @@ print(f"\nSaved {EVAL_OUT / 'benchmark_results.json'}")
 #
 # ---
 #
-# **Bạn vừa hoàn thành full Lab 22 pipeline.** Run `make verify` để check submission readiness.
+# **Bạn vừa hoàn thành full Lab 22 pipeline.** Run `make verify` (laptop) hoặc kiểm tra artifacts trong `submission/` (Colab).

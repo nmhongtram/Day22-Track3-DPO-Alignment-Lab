@@ -73,6 +73,9 @@ SFT_PATH = REPO_ROOT / "adapters" / "sft-mini"
 model = PeftModel.from_pretrained(model, str(SFT_PATH))
 print(f"Loaded SFT-mini adapter from {SFT_PATH}")
 
+model = PeftModel.from_pretrained(model, str(DPO_PATH))
+print(f"Loaded DPO adapter from {DPO_PATH}")
+
 # %% [markdown]
 # > **Note:** The DPO adapter trained in NB3 stacks on top of SFT. To get a fully
 # > aligned merged model, we apply both adapters before merging. Unsloth's
@@ -165,11 +168,20 @@ assert gguf_files, "No Q4_K_M GGUF found — step 3 may have failed"
 gguf_path = gguf_files[0]
 print(f"Loading: {gguf_path.name}")
 
-# n_gpu_layers=-1 offloads all layers to GPU if compiled with CUDA/Metal/Vulkan
+# Use GPU layers only if llama-cpp was built with CUDA; else CPU avoids hang/timeout.
+try:
+    from llama_cpp import llama_cpp
+    has_cuda = getattr(llama_cpp, "llama_supports_gpu_offload", lambda: False)()
+except Exception:
+    has_cuda = False
+n_gpu = -1 if has_cuda else 0
+if not has_cuda:
+    print("WARN: llama-cpp-python CPU build — using n_gpu_layers=0 (slower smoke test).")
+
 llm = Llama(
     model_path=str(gguf_path),
     n_ctx=MAX_LEN,
-    n_gpu_layers=-1,           # all layers on GPU; falls back to CPU if no GPU compile
+    n_gpu_layers=n_gpu,
     verbose=False,
 )
 print("Loaded.")
@@ -246,7 +258,7 @@ print("Saved data/eval/deploy_meta.json")
 #
 # Bạn vừa hoàn thành core lab. Trước khi submit:
 #
-# 1. **Run** `make verify` — gatekeeper sẽ list missing artifacts.
+# 1. **Run** `make verify` (laptop) hoặc checklist artifacts bên dưới (Colab standalone).
 # 2. **Take screenshots** vào `submission/screenshots/` (xem `submission/screenshots/README.md`).
 # 3. **Fill** `submission/REFLECTION.md` — đặc biệt là § 3 (reward curves analysis,
 #    cross-reference deck §3.4) và § 6 (single change that mattered most).
